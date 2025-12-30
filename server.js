@@ -5,8 +5,16 @@ import iconv from 'iconv-lite';
 const app = express();
 app.use(express.json());
 
-function toCp949(str) {
-  const buf = iconv.encode(str, 'cp949');
+function toNaverEncoded(str) {
+  // 1) UTF-8 기반 URL 인코딩(= %XX 문자열)
+  const utf8UrlEncoded = encodeURIComponent(str);
+
+  // 2) 그 문자열의 UTF-8 바이트를 "CP949로 디코딩"해서 이상한(재해석된) 문자열 생성
+  const reinterpreted = iconv.decode(Buffer.from(utf8UrlEncoded, 'utf8'), 'cp949');
+
+  // 3) 그 문자열을 CP949 바이트로 다시 인코딩 후 %XX로 변환
+  const buf = iconv.encode(reinterpreted, 'cp949');
+
   return Array.from(buf)
     .map(b => '%' + b.toString(16).toUpperCase().padStart(2, '0'))
     .join('');
@@ -25,7 +33,7 @@ app.post('/cafe/post', async (req, res) => {
   }
 
   const body =
-    `subject=${toCp949(subject)}&content=${toCp949(content)}`;
+  `subject=${toNaverEncoded(subject)}&content=${toNaverEncoded(content)}`;
 
   const url =
     `https://openapi.naver.com/v1/cafe/${clubid}/menu/${menuid}/articles`;
