@@ -4,20 +4,19 @@ import iconv from 'iconv-lite';
 import FormData from 'form-data';
 
 const app = express();
-app.use(express.json()); // ✅ 괄호 꼭 필요
+app.use(express.json()); // ✅ 괄호 꼭
 
+/**
+ * (텍스트 only 전송용) 네이버 카페 API가 요구하는 "특이 인코딩" 대응
+ * - x-www-form-urlencoded로 보낼 때 사용
+ */
 function toNaverEncoded(str) {
-  // 1) UTF-8 기반 URL 인코딩(= %XX 문자열)
   const utf8UrlEncoded = encodeURIComponent(str);
-
-  // 2) 그 문자열의 UTF-8 바이트를 CP949로 디코딩(재해석)
   const reinterpreted = iconv.decode(Buffer.from(utf8UrlEncoded, 'utf8'), 'cp949');
-
-  // 3) 다시 CP949로 인코딩 후 %XX로 변환
   const buf = iconv.encode(reinterpreted, 'cp949');
 
   return Array.from(buf)
-    .map(b => '%' + b.toString(16).toUpperCase().padStart(2, '0'))
+    .map((b) => '%' + b.toString(16).toUpperCase().padStart(2, '0'))
     .join('');
 }
 
@@ -25,7 +24,6 @@ function pickFilenameFromUrl(urlStr, fallbackExt = 'jpg') {
   try {
     const u = new URL(urlStr);
     const last = u.pathname.split('/').pop() || `image.${fallbackExt}`;
-    // 쿼리 제거된 pathname이라 안전, 그래도 최소 정리
     return last.includes('.') ? last : `${last}.${fallbackExt}`;
   } catch {
     return `image.${fallbackExt}`;
@@ -52,10 +50,7 @@ app.post('/cafe/post', async (req, res) => {
   const { subject, content, image, clubid, menuid } = req.body;
   const authHeader = req.headers.authorization;
 
-  if (!authHeader) {
-    return res.status(401).json({ error: 'Missing Authorization header' });
-  }
-
+  if (!authHeader) return res.status(401).json({ error: 'Missing Authorization header' });
   if (!subject || !content || !clubid || !menuid) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
@@ -63,7 +58,10 @@ app.post('/cafe/post', async (req, res) => {
   const url = `https://openapi.naver.com/v1/cafe/${clubid}/menu/${menuid}/articles`;
 
   try {
-    // ✅ 이미지가 없으면: 기존처럼 x-www-form-urlencoded로 전송
+    // ✅ 디버그(원인 확인용): 필요 없으면 지워도 됨
+    // console.log('[DEBUG] subject from n8n:', subject);
+
+    // 1) 이미지가 없으면: 기존 방식(텍스트만) 유지
     if (!image || (Array.isArray(image) && image.length === 0)) {
       const body = `subject=${toNaverEncoded(subject)}&content=${toNaverEncoded(content)}`;
 
@@ -80,7 +78,7 @@ app.post('/cafe/post', async (req, res) => {
       return res.status(r.status).send(text);
     }
 
-    // ✅ 이미지가 있으면: multipart/form-data로 전송 (문서 요구사항)
+    // 2) 이미지가 있으면: multipart/form-data
     const imageUrls = Array.isArray(image) ? image : [image];
     if (imageUrls.length > 10) {
       return res.status(400).json({ error: 'Too many images (max 10)' });
@@ -88,23 +86,25 @@ app.post('/cafe/post', async (req, res) => {
 
     const form = new FormData();
 
-    // subject/content는 문서처럼 URL 인코딩 + (네이버식) 재인코딩된 값을 넣어줌
-    //form.append('subject', toNaverEncoded(subject));
-    //form.append('content', toNaverEncoded(content));
+    /**
+     * 🔥 핵심: multipart에서는 subject/content를 URL 인코딩 문자열로 넣으면
+     * 네이버가 디코딩하지 않고 "그대로 저장"해서 %EC%..가 노출될 수 있음.
+     *
+     * 그래서 subject/content를 "CP949 바이트(Buffer)"로 넣고 charset을 명시.
+     * (이게 지금 문제를 잡는 가장 확실한 방법)
+     */
+    form.append('subject', iconv.encode(subject, 'cp949'), {
+      contentType: 'text/plain; charset=MS949',
+    });
+    form.append('content', iconv.encode(content, 'cp949'), {
+      contentType: 'text/plain; charset=MS949',
+    });
 
-    // 이미지 없을 때(텍스트만): 기존 방식 유지
-    const body = `subject=${toNaverEncoded(subject)}&content=${toNaverEncoded(content)}`;
-
-    // 이미지 있을 때(multipart): 원문 그대로
-    form.append('subject', subject);
-    form.append('content', content);
-
-    // 여러 장이면 image 파라미터를 반복해서 append (문서/예제 방식)
+    // 이미지 파일 첨부 (URL -> 다운로드 -> 파일로 append)
     for (const imgUrl of imageUrls) {
       const { buf, contentType } = await downloadImageAsBuffer(imgUrl);
-
-      // filename은 URL에서 추정
-      const filename = pickFilenameFromUrl(imgUrl, contentType.includes('png') ? 'png' : 'jpg');
+      const ext = contentType.includes('png') ? 'png' : (contentType.includes('webp') ? 'webp' : 'jpg');
+      const filename = pickFilenameFromUrl(imgUrl, ext);
 
       form.append('image', buf, { filename, contentType });
     }
@@ -113,7 +113,7 @@ app.post('/cafe/post', async (req, res) => {
       method: 'POST',
       headers: {
         Authorization: authHeader,
-        ...form.getHeaders(), // ✅ boundary 포함 Content-Type 자동 생성
+        ...form.getHeaders(), // boundary 포함
       },
       body: form,
     });
@@ -127,6 +127,4 @@ app.post('/cafe/post', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
