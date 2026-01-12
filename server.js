@@ -89,8 +89,15 @@ app.post('/cafe/post', async (req, res) => {
     const form = new FormData();
 
     // subject/content는 문서처럼 URL 인코딩 + (네이버식) 재인코딩된 값을 넣어줌
-    form.append('subject', toNaverEncoded(subject));
-    form.append('content', toNaverEncoded(content));
+    //form.append('subject', toNaverEncoded(subject));
+    //form.append('content', toNaverEncoded(content));
+
+    // 이미지 없을 때(텍스트만): 기존 방식 유지
+    const body = `subject=${toNaverEncoded(subject)}&content=${toNaverEncoded(content)}`;
+
+    // 이미지 있을 때(multipart): 원문 그대로
+    form.append('subject', subject);
+    form.append('content', content);
 
     // 여러 장이면 image 파라미터를 반복해서 append (문서/예제 방식)
     for (const imgUrl of imageUrls) {
